@@ -100,9 +100,9 @@ void GameApp::UpdateScene(float dt)
 		if (ImGui::IsKeyDown(ImGuiKey_S))
 			dWS -= dt * 2;
 		if (ImGui::IsKeyDown(ImGuiKey_A))
-			dAD -= dt * 2;
-		if (ImGui::IsKeyDown(ImGuiKey_D))
 			dAD += dt * 2;
+		if (ImGui::IsKeyDown(ImGuiKey_D))
+			dAD -= dt * 2;
 		//QE滚筒旋转
 		if (ImGui::IsKeyDown(ImGuiKey_Q))
 			rollQE += dt * 2;
