@@ -5,7 +5,7 @@
 */
 void Symmetry(in float3 p, out float3 p_s)
 {
-    float A = 0.f, B = 0.f, C = 1.f, D = -2.f;
+    float A = 1.f, B = 0.f, C = 0.f, D = -1.f;
     float f1 = A * A + B * B + C * C;
     float f2 = A * p.x + B * p.y + C * p.z + D;
     p_s.x = p.x - 2 * A * (f2) / f1;
@@ -15,12 +15,12 @@ void Symmetry(in float3 p, out float3 p_s)
 
 
 [maxvertexcount(6)]
-void GS(
-	triangle VertexOut input[3],
-	inout TriangleStream<VertexOut> output
+void GS_Hanzi(
+	triangle VertexOut_Hanzi input[3],
+	inout TriangleStream<VertexOut_Hanzi> output
 )
 {
-    VertexOut vOri[3], vNew[3];
+    VertexOut_Hanzi vOri[3], vNew[3];
     
 	[unroll]
     for (uint i = 0; i < 3; i++)
