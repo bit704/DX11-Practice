@@ -20,7 +20,8 @@ GameApp::GameApp(HINSTANCE hInstance, const std::wstring& windowName, int initWi
     m_PointLight2(),
     m_PointLight3(),
     m_SpotLight(),
-    m_IsWireframeMode(false)
+    m_CBReflect(),
+    m_CBStates()
 {
 }
 
@@ -49,11 +50,6 @@ void GameApp::OnResize()
 
 void GameApp::UpdateScene(float dt)
 {
-    //更新PS常量缓冲区的时间变量
-    static float time = 0;
-	time += dt;
-    time = time >= 1.f ? 0 : time;
-	m_PSConstantBuffer.time = XMFLOAT4(time, 0.f, 0.f, 0.f);
 
     // 获取IO事件
     ImGuiIO& io = ImGui::GetIO();
@@ -82,11 +78,17 @@ void GameApp::UpdateScene(float dt)
         //公转
         rotateAngle += 2 * dt;
         rotateAngle = XMScalarModAngle(rotateAngle);
+
+        //更新PS常量缓冲区的时间变量
+        static float time = 0;
+        time += dt;
+        time = time >= 1.f ? 0 : time;
+        m_PSConstantBuffer.time = XMFLOAT4(time, 0.f, 0.f, 0.f);
     }
     //光源开关
     static bool dirLightSwitch = true;
-    static bool pointLightSwitch = false;
-    static bool spotLightSwitch = false;
+    static bool pointLightSwitch = true;
+    static bool spotLightSwitch = true;
 
     //UI界面逻辑
     if (ImGui::Begin("ImGui"))
@@ -173,7 +175,7 @@ void GameApp::UpdateScene(float dt)
     //相机漫游
     m_VSConstantBuffer.view = XMMatrixTranspose(
         XMMatrixLookAtLH(
-            XMVectorSet(0.f, 0.f, dWS - 7.0f, 0.f), //WS前后移动
+            XMVectorSet(0.f, 0.f, dWS - 6.0f, 0.f), //WS前后移动
             XMVectorSet(0.0f, 0.0f, 0.0f, 0.0f),
             XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f)) *
         XMMatrixTranslation(dAD, 0.f, 0.f) * //AD左右移动
@@ -230,8 +232,67 @@ void GameApp::UpdateScene(float dt)
     m_pd3dImmediateContext->ClearRenderTargetView(m_pRenderTargetView.Get(), reinterpret_cast<const float*>(&Colors::Black));
     m_pd3dImmediateContext->ClearDepthStencilView(m_pDepthStencilView.Get(), D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
 
-    SetPlane();
-    SetHanzi(scale,theta,phi,rotateAngle);
+
+    // 1. 单独写入镜子的模板值为1，不写入颜色
+
+    m_pd3dImmediateContext->RSSetState(nullptr);
+    m_pd3dImmediateContext->OMSetDepthStencilState(DSSWriteStencil.Get(), 1);
+    m_pd3dImmediateContext->OMSetBlendState(BSNoColorWrite.Get(), nullptr, 0xFFFFFFFF);
+    DrawMirror();
+
+    // 2. 绘制镜面反射汉字
+    
+    // 开启反射绘制
+    m_CBStates.isReflection = true;
+    D3D11_MAPPED_SUBRESOURCE mappedData;
+    HR(m_pd3dImmediateContext->Map(m_pConstantBuffers[2].Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedData));
+    memcpy_s(mappedData.pData, sizeof(CBDrawingStates), &m_CBStates, sizeof(CBDrawingStates));
+    m_pd3dImmediateContext->Unmap(m_pConstantBuffers[2].Get(), 0);
+
+    // 顺时针裁剪
+    // 仅对模板值为1的镜面区域绘制
+    m_pd3dImmediateContext->RSSetState(RSCullClockWise.Get());
+    m_pd3dImmediateContext->OMSetDepthStencilState(DSSDrawWithStencil.Get(), 1);
+    m_pd3dImmediateContext->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+
+    DrawHanzi(scale, theta, phi, rotateAngle);
+
+    // 3. 绘制镜面反射透明照片
+
+    // 关闭顺逆时针裁剪
+    // 仅对模板值为1的镜面区域绘制
+    // 透明混合
+    m_pd3dImmediateContext->RSSetState(RSNoCull.Get());
+    m_pd3dImmediateContext->OMSetDepthStencilState(DSSDrawWithStencil.Get(), 1);
+    m_pd3dImmediateContext->OMSetBlendState(BSTransparent.Get(), nullptr, 0xFFFFFFFF);
+
+    DrawPlane();
+    DrawMirror();
+
+    // 关闭反射绘制
+    m_CBStates.isReflection = false;
+    HR(m_pd3dImmediateContext->Map(m_pConstantBuffers[2].Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedData));
+    memcpy_s(mappedData.pData, sizeof(CBDrawingStates), &m_CBStates, sizeof(CBDrawingStates));
+    m_pd3dImmediateContext->Unmap(m_pConstantBuffers[2].Get(), 0);
+
+    // 4. 绘制汉字
+
+    m_pd3dImmediateContext->RSSetState(nullptr);
+    m_pd3dImmediateContext->OMSetDepthStencilState(nullptr, 0);
+    m_pd3dImmediateContext->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+
+    DrawHanzi(scale, theta, phi, rotateAngle);
+
+    // 5. 绘制透明照片
+    //
+
+    // 关闭裁剪
+    // 透明混合
+    m_pd3dImmediateContext->RSSetState(RSNoCull.Get());
+    m_pd3dImmediateContext->OMSetDepthStencilState(nullptr, 0);
+    m_pd3dImmediateContext->OMSetBlendState(BSTransparent.Get(), nullptr, 0xFFFFFFFF);
+
+    DrawPlane();
 
     // 下面这句话会触发ImGui在Direct3D的绘制
     // 因此需要在此之前将后备缓冲区绑定到渲染管线上
@@ -259,6 +320,17 @@ void GameApp::UpdateConstantBuffer()
 bool GameApp::InitEffect()
 {
     ComPtr<ID3DBlob> blob;
+
+    //Mirror
+    // 创建顶点着色器
+    HR(CreateShaderFromFile(L"HLSL\\VS_Mirror.cso", L"HLSL\\VS_Mirror.hlsl", "VS", "vs_5_0", blob.ReleaseAndGetAddressOf()));
+    HR(m_pd3dDevice->CreateVertexShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, m_pVertexShader_Mirror.GetAddressOf()));
+    // 创建并绑定顶点布局
+    HR(m_pd3dDevice->CreateInputLayout(VertexPosNormalTex::inputLayout, ARRAYSIZE(VertexPosNormalTex::inputLayout),
+        blob->GetBufferPointer(), blob->GetBufferSize(), m_pVertexLayout_Mirror.GetAddressOf()));
+    // 创建像素着色器
+    HR(CreateShaderFromFile(L"HLSL\\PS_Mirror.cso", L"HLSL\\PS_Mirror.hlsl", "PS", "ps_5_0", blob.ReleaseAndGetAddressOf()));
+    HR(m_pd3dDevice->CreatePixelShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, m_pPixelShader_Mirror.GetAddressOf()));
 
     //Plane
     // 创建顶点着色器
@@ -297,7 +369,9 @@ bool GameApp::InitResource()
 
     // 初始化照片纹理
     HR(CreateWICTextureFromFile(m_pd3dDevice.Get(), L"Texture\\photo.png", nullptr, m_pPhoto.GetAddressOf()));
-   
+    // 初始化镜面纹理
+    HR(CreateDDSTextureFromFile(m_pd3dDevice.Get(), L"Texture\\ice.dds", nullptr, m_pMirror.GetAddressOf()));
+
     // 初始化采样器状态
     D3D11_SAMPLER_DESC sampDesc;
     ZeroMemory(&sampDesc, sizeof(sampDesc));
@@ -317,16 +391,39 @@ bool GameApp::InitResource()
     D3D11_BUFFER_DESC cbd;
     ZeroMemory(&cbd, sizeof(cbd));
     cbd.Usage = D3D11_USAGE_DYNAMIC;
-    cbd.ByteWidth = sizeof(VSConstantBuffer);
     cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     // 新建用于VS和PS的常量缓冲区
+    cbd.ByteWidth = sizeof(VSConstantBuffer);
     HR(m_pd3dDevice->CreateBuffer(&cbd, nullptr, m_pConstantBuffers[0].GetAddressOf()));
     cbd.ByteWidth = sizeof(PSConstantBuffer);
-    HR(m_pd3dDevice->CreateBuffer(&cbd, nullptr, m_pConstantBuffers[1].GetAddressOf()));
+    HR(m_pd3dDevice->CreateBuffer(&cbd, nullptr, m_pConstantBuffers[1].GetAddressOf()))
+    cbd.ByteWidth = sizeof(CBDrawingStates);
+    HR(m_pd3dDevice->CreateBuffer(&cbd, nullptr, m_pConstantBuffers[2].GetAddressOf()));
+    cbd.ByteWidth = sizeof(CBReflect);
+    HR(m_pd3dDevice->CreateBuffer(&cbd, nullptr, m_pConstantBuffers[3].GetAddressOf()));
 
-    // ******************
-    // 初始化默认光照
+    //***********
+    //绑定常量缓冲区
+
+    // GS常量缓冲区对应HLSL寄存于b0的常量缓冲区
+    m_pd3dImmediateContext->GSSetConstantBuffers(0, 1, m_pConstantBuffers[0].GetAddressOf());
+    // VS常量缓冲区对应HLSL寄存于b0的常量缓冲区
+    m_pd3dImmediateContext->VSSetConstantBuffers(0, 1, m_pConstantBuffers[0].GetAddressOf());
+    m_pd3dImmediateContext->VSSetConstantBuffers(2, 1, m_pConstantBuffers[2].GetAddressOf());
+    m_pd3dImmediateContext->VSSetConstantBuffers(3, 1, m_pConstantBuffers[3].GetAddressOf());
+    // PS常量缓冲区对应HLSL寄存于b1的常量缓冲区
+    m_pd3dImmediateContext->PSSetConstantBuffers(1, 1, m_pConstantBuffers[1].GetAddressOf());
+    m_pd3dImmediateContext->PSSetConstantBuffers(2, 1, m_pConstantBuffers[2].GetAddressOf());
+    m_pd3dImmediateContext->VSSetConstantBuffers(3, 1, m_pConstantBuffers[3].GetAddressOf());
+    // PS设置采样器和纹理
+    m_pd3dImmediateContext->PSSetSamplers(0, 1, m_pSamplerState.GetAddressOf());
+    m_pd3dImmediateContext->PSSetShaderResources(0, 1, m_pPhoto.GetAddressOf());
+    m_pd3dImmediateContext->PSSetShaderResources(1, 1, m_pMirror.GetAddressOf());
+
+
+    //*******************
+    // 更新常量缓冲区
     // 
     
     // 方向光
@@ -356,42 +453,173 @@ bool GameApp::InitResource()
     // 初始化用于VS的常量缓冲区的值
     m_VSConstantBuffer.world = XMMatrixIdentity();			
     m_VSConstantBuffer.view = XMMatrixTranspose(XMMatrixLookAtLH(
-        XMVectorSet(0.0f, 0.0f, -7.0f, 0.0f),
+        XMVectorSet(0.0f, 0.0f, -6.0f, 0.0f),
         XMVectorSet(0.0f, 0.0f, 0.0f, 0.0f),
         XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f)
     ));
     m_VSConstantBuffer.proj = XMMatrixTranspose(XMMatrixPerspectiveFovLH(XM_PIDIV2, AspectRatio(), 1.0f, 1000.0f));
     m_VSConstantBuffer.worldInvTranspose = XMMatrixIdentity();
     
+    // 更新PS常量缓冲区资源
+    D3D11_MAPPED_SUBRESOURCE mappedData;
+    HR(m_pd3dImmediateContext->Map(m_pConstantBuffers[0].Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedData));
+    memcpy_s(mappedData.pData, sizeof(VSConstantBuffer), &m_VSConstantBuffer, sizeof(VSConstantBuffer));
+    m_pd3dImmediateContext->Unmap(m_pConstantBuffers[0].Get(), 0);
+
     // 初始化用于PS的常量缓冲区的值
     // 白色
     m_PSConstantBuffer.material.ambient = XMFLOAT4(1.f, 1.f, 1.f, 1.0f);
-    m_PSConstantBuffer.material.diffuse = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
+    m_PSConstantBuffer.material.diffuse = XMFLOAT4(1.f, 1.f, 1.f, 1.0f);
     m_PSConstantBuffer.material.specular = XMFLOAT4(0.5f, 0.5f, 0.5f, 5.0f);
     
     m_PointLight2 = m_PointLight1;
     m_PointLight3 = m_PointLight1;
 
-
     // 注意不要忘记设置此处的观察位置，否则高亮部分会有问题
     m_PSConstantBuffer.eyePos = XMFLOAT4(0.0f, 0.0f, -7.0f, 0.0f);
 
     // 更新PS常量缓冲区资源
-    D3D11_MAPPED_SUBRESOURCE mappedData;
     HR(m_pd3dImmediateContext->Map(m_pConstantBuffers[1].Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedData));
     memcpy_s(mappedData.pData, sizeof(PSConstantBuffer), &m_PSConstantBuffer, sizeof(PSConstantBuffer));
     m_pd3dImmediateContext->Unmap(m_pConstantBuffers[1].Get(), 0);
 
+    // 反射矩阵
+    m_CBReflect.reflection = XMMatrixTranspose(XMMatrixReflect(XMVectorSet(0.0f, 1.0f, 0.0f, 3.0f)));
+    HR(m_pd3dImmediateContext->Map(m_pConstantBuffers[3].Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedData));
+    memcpy_s(mappedData.pData, sizeof(CBReflect), &m_CBReflect, sizeof(CBReflect));
+    m_pd3dImmediateContext->Unmap(m_pConstantBuffers[3].Get(), 0);
+    
+
     // ******************
-    // 初始化光栅化状态
+    // 初始化光栅化器状态
     //
     D3D11_RASTERIZER_DESC rasterizerDesc;
     ZeroMemory(&rasterizerDesc, sizeof(rasterizerDesc));
+
+    // 线框模式
     rasterizerDesc.FillMode = D3D11_FILL_WIREFRAME;
     rasterizerDesc.CullMode = D3D11_CULL_NONE;
     rasterizerDesc.FrontCounterClockwise = false;
     rasterizerDesc.DepthClipEnable = true;
-    HR(m_pd3dDevice->CreateRasterizerState(&rasterizerDesc, m_pRSWireframe.GetAddressOf()));
+    HR(m_pd3dDevice->CreateRasterizerState(&rasterizerDesc, RSWireframe.GetAddressOf()));
+
+    // 无背面剔除模式
+    rasterizerDesc.FillMode = D3D11_FILL_SOLID;
+    rasterizerDesc.CullMode = D3D11_CULL_NONE;
+    rasterizerDesc.FrontCounterClockwise = false;
+    rasterizerDesc.DepthClipEnable = true;
+    HR(m_pd3dDevice->CreateRasterizerState(&rasterizerDesc, RSNoCull.GetAddressOf()));
+
+    // 顺时针剔除模式
+    rasterizerDesc.FillMode = D3D11_FILL_SOLID;
+    rasterizerDesc.CullMode = D3D11_CULL_BACK;
+    rasterizerDesc.FrontCounterClockwise = true;
+    rasterizerDesc.DepthClipEnable = true;
+    HR(m_pd3dDevice->CreateRasterizerState(&rasterizerDesc, RSCullClockWise.GetAddressOf()));
+
+
+    // ******************
+    // 初始化混合状态
+    //
+    D3D11_BLEND_DESC blendDesc;
+    ZeroMemory(&blendDesc, sizeof(blendDesc));
+    auto& rtDesc = blendDesc.RenderTarget[0];
+    // Alpha-To-Coverage模式
+    blendDesc.AlphaToCoverageEnable = true;
+    blendDesc.IndependentBlendEnable = false;
+    rtDesc.BlendEnable = false;
+    rtDesc.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    HR(m_pd3dDevice->CreateBlendState(&blendDesc, BSAlphaToCoverage.GetAddressOf()));
+
+    // 透明混合模式
+    // Color = SrcAlpha * SrcColor + (1 - SrcAlpha) * DestColor 
+    // Alpha = SrcAlpha
+    blendDesc.AlphaToCoverageEnable = false;
+    blendDesc.IndependentBlendEnable = false;
+    rtDesc.BlendEnable = true;
+    rtDesc.SrcBlend = D3D11_BLEND_SRC_ALPHA;
+    rtDesc.DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+    rtDesc.BlendOp = D3D11_BLEND_OP_ADD;
+    rtDesc.SrcBlendAlpha = D3D11_BLEND_ONE;
+    rtDesc.DestBlendAlpha = D3D11_BLEND_ZERO;
+    rtDesc.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    HR(m_pd3dDevice->CreateBlendState(&blendDesc, BSTransparent.GetAddressOf()));
+
+    // 加法混合模式
+    // Color = SrcColor + DestColor
+    // Alpha = SrcAlpha
+    rtDesc.SrcBlend = D3D11_BLEND_ONE;
+    rtDesc.DestBlend = D3D11_BLEND_ONE;
+    rtDesc.BlendOp = D3D11_BLEND_OP_ADD;
+    rtDesc.SrcBlendAlpha = D3D11_BLEND_ONE;
+    rtDesc.DestBlendAlpha = D3D11_BLEND_ZERO;
+    rtDesc.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    HR(m_pd3dDevice->CreateBlendState(&blendDesc, BSAdditive.GetAddressOf()));
+
+    // 无颜色写入混合模式
+    // Color = DestColor
+    // Alpha = DestAlpha
+    rtDesc.BlendEnable = false;
+    rtDesc.SrcBlend = D3D11_BLEND_ZERO;
+    rtDesc.DestBlend = D3D11_BLEND_ONE;
+    rtDesc.BlendOp = D3D11_BLEND_OP_ADD;
+    rtDesc.SrcBlendAlpha = D3D11_BLEND_ZERO;
+    rtDesc.DestBlendAlpha = D3D11_BLEND_ONE;
+    rtDesc.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    rtDesc.RenderTargetWriteMask = 0;
+    HR(m_pd3dDevice->CreateBlendState(&blendDesc, BSNoColorWrite.GetAddressOf()));
+
+
+    // ******************
+    // 初始化深度/模板状态
+    //
+
+    D3D11_DEPTH_STENCIL_DESC dsDesc;
+
+    // 写入模板值的深度/模板状态
+    // 这里不写入深度信息
+    // 无论是正面还是背面，原来指定的区域的模板值都会被写入StencilRef
+    dsDesc.DepthEnable = true;
+    dsDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+    dsDesc.DepthFunc = D3D11_COMPARISON_LESS;
+
+    dsDesc.StencilEnable = true;
+    dsDesc.StencilReadMask = D3D11_DEFAULT_STENCIL_READ_MASK;
+    dsDesc.StencilWriteMask = D3D11_DEFAULT_STENCIL_WRITE_MASK;
+
+    dsDesc.FrontFace.StencilFailOp = D3D11_STENCIL_OP_KEEP;
+    dsDesc.FrontFace.StencilDepthFailOp = D3D11_STENCIL_OP_KEEP;
+    dsDesc.FrontFace.StencilPassOp = D3D11_STENCIL_OP_REPLACE;
+    dsDesc.FrontFace.StencilFunc = D3D11_COMPARISON_ALWAYS;
+    // 对于背面的几何体我们是不进行渲染的，所以这里的设置无关紧要
+    dsDesc.BackFace.StencilFailOp = D3D11_STENCIL_OP_KEEP;
+    dsDesc.BackFace.StencilDepthFailOp = D3D11_STENCIL_OP_KEEP;
+    dsDesc.BackFace.StencilPassOp = D3D11_STENCIL_OP_REPLACE;
+    dsDesc.BackFace.StencilFunc = D3D11_COMPARISON_ALWAYS;
+
+    HR(m_pd3dDevice->CreateDepthStencilState(&dsDesc, DSSWriteStencil.GetAddressOf()));
+
+    // 对指定模板值进行绘制的深度/模板状态
+    // 对满足模板值条件的区域才进行绘制，并更新深度
+    dsDesc.DepthEnable = true;
+    dsDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+    dsDesc.DepthFunc = D3D11_COMPARISON_LESS;
+
+    dsDesc.StencilEnable = true;
+    dsDesc.StencilReadMask = D3D11_DEFAULT_STENCIL_READ_MASK;
+    dsDesc.StencilWriteMask = D3D11_DEFAULT_STENCIL_WRITE_MASK;
+
+    dsDesc.FrontFace.StencilFailOp = D3D11_STENCIL_OP_KEEP;
+    dsDesc.FrontFace.StencilDepthFailOp = D3D11_STENCIL_OP_KEEP;
+    dsDesc.FrontFace.StencilPassOp = D3D11_STENCIL_OP_KEEP;
+    dsDesc.FrontFace.StencilFunc = D3D11_COMPARISON_EQUAL;
+    // 对于背面的几何体我们是不进行渲染的，所以这里的设置无关紧要
+    dsDesc.BackFace.StencilFailOp = D3D11_STENCIL_OP_KEEP;
+    dsDesc.BackFace.StencilDepthFailOp = D3D11_STENCIL_OP_KEEP;
+    dsDesc.BackFace.StencilPassOp = D3D11_STENCIL_OP_KEEP;
+    dsDesc.BackFace.StencilFunc = D3D11_COMPARISON_EQUAL;
+
+    HR(m_pd3dDevice->CreateDepthStencilState(&dsDesc, DSSDrawWithStencil.GetAddressOf()));
 
 
     // ******************
@@ -403,10 +631,100 @@ bool GameApp::InitResource()
     return true;
 }
 
+//绘制Mirror
+void GameApp::DrawMirror()
+{
+    // ******************
+    // 设置顶点缓冲区和索引缓冲区
+    //
+
+    // 释放旧资源
+    m_pVertexBuffer.Reset();
+    m_pIndexBuffer.Reset();
+
+    // 创建Plane顶点
+    VertexPosNormalTex* vertices = nullptr;
+    Mirror::CreateVertexs(&vertices, m_VertexCount_Mirror);
+
+    // 设置顶点缓冲区描述
+    D3D11_BUFFER_DESC vbd;
+    ZeroMemory(&vbd, sizeof(vbd));
+    vbd.Usage = D3D11_USAGE_IMMUTABLE;
+    vbd.ByteWidth = m_VertexCount_Mirror * sizeof VertexPosNormalTex;
+    vbd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+    vbd.CPUAccessFlags = 0;
+    // 新建顶点缓冲区
+    D3D11_SUBRESOURCE_DATA InitData;
+    ZeroMemory(&InitData, sizeof(InitData));
+    InitData.pSysMem = vertices;
+    HR(m_pd3dDevice->CreateBuffer(&vbd, &InitData, m_pVertexBuffer.GetAddressOf()));
+
+    // 输入装配阶段的顶点缓冲区设置
+    UINT stride = sizeof(VertexPosNormalTex);	// 跨越字节数
+    UINT offset = 0;							// 起始偏移量
+
+    m_pd3dImmediateContext->IASetVertexBuffers(0, 1, m_pVertexBuffer.GetAddressOf(), &stride, &offset);
+
+    // 创建Plane索引
+    DWORD* indices = nullptr;
+    Mirror::CreateIndices(&indices, m_IndexCount_Mirror);
+
+    // 设置索引缓冲区描述
+    D3D11_BUFFER_DESC ibd;
+    ZeroMemory(&ibd, sizeof(ibd));
+    ibd.Usage = D3D11_USAGE_IMMUTABLE;
+    ibd.ByteWidth = m_IndexCount_Mirror * sizeof(DWORD);
+    ibd.BindFlags = D3D11_BIND_INDEX_BUFFER;
+    ibd.CPUAccessFlags = 0;
+    // 新建索引缓冲区
+    InitData.pSysMem = indices;
+    HR(m_pd3dDevice->CreateBuffer(&ibd, &InitData, m_pIndexBuffer.GetAddressOf()));
+    // 输入装配阶段的索引缓冲区设置
+    m_pd3dImmediateContext->IASetIndexBuffer(m_pIndexBuffer.Get(), DXGI_FORMAT_R32_UINT, 0);
+
+    // 设置调试对象名
+    D3D11SetDebugObjectName(m_pVertexBuffer.Get(), "VertexBuffer");
+    D3D11SetDebugObjectName(m_pIndexBuffer.Get(), "IndexBuffer");
+
+    //释放堆内存
+    delete[] vertices;
+    delete[] indices;
+
+    // ******************
+    // 给渲染管线各个阶段绑定好所需资源
+    //
+
+    // 设置图元类型，设定输入布局
+    m_pd3dImmediateContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    m_pd3dImmediateContext->IASetInputLayout(m_pVertexLayout_Mirror.Get());
+
+    // 绑定VS
+    m_pd3dImmediateContext->VSSetShader(m_pVertexShader_Mirror.Get(), nullptr, 0);
+    // 取消GS绑定
+    m_pd3dImmediateContext->GSSetShader(nullptr, nullptr, 0);
+    // 绑定PS
+    m_pd3dImmediateContext->PSSetShader(m_pPixelShader_Mirror.Get(), nullptr, 0);
+
+    // ******************
+    // 设置调试对象名
+    //
+    D3D11SetDebugObjectName(m_pVertexLayout_Plane.Get(), "VertexPosNormalColorLayout_Mirror");
+    D3D11SetDebugObjectName(m_pVertexShader_Plane.Get(), "VS_Mirror");
+    D3D11SetDebugObjectName(m_pPixelShader_Plane.Get(), "PS_Mirror");
 
 
-//设置Plane
-void GameApp::SetPlane()
+    //更新常量缓冲区
+    m_VSConstantBuffer.world = XMMatrixTranspose(
+        XMMatrixScalingFromVector(XMVectorSet(2.f, 2.f, 2.f, 0.f)));
+
+    UpdateConstantBuffer();
+    // 绘制顶点
+    m_pd3dImmediateContext->DrawIndexed(m_IndexCount_Mirror, 0, 0);
+}
+
+
+//绘制Plane
+void GameApp::DrawPlane()
 {
     // ******************
     // 设置顶点缓冲区和索引缓冲区
@@ -474,37 +792,32 @@ void GameApp::SetPlane()
 
     // 绑定VS
     m_pd3dImmediateContext->VSSetShader(m_pVertexShader_Plane.Get(), nullptr, 0);
-    // VS常量缓冲区对应HLSL寄存于b0的常量缓冲区
-    m_pd3dImmediateContext->VSSetConstantBuffers(0, 1, m_pConstantBuffers[0].GetAddressOf());
     // 取消GS绑定
     m_pd3dImmediateContext->GSSetShader(nullptr, nullptr, 0);
     // 绑定PS
     m_pd3dImmediateContext->PSSetShader(m_pPixelShader_Plane.Get(), nullptr, 0);
-    // PS常量缓冲区对应HLSL寄存于b1的常量缓冲区
-    m_pd3dImmediateContext->PSSetConstantBuffers(1, 1, m_pConstantBuffers[1].GetAddressOf());
-    // PS设置采样器和纹理
-    m_pd3dImmediateContext->PSSetSamplers(0, 1, m_pSamplerState.GetAddressOf());
-    m_pd3dImmediateContext->PSSetShaderResources(0, 1, m_pPhoto.GetAddressOf());
+
 
     // ******************
     // 设置调试对象名
     //
     D3D11SetDebugObjectName(m_pVertexLayout_Plane.Get(), "VertexPosNormalColorLayout_Plane");
-    D3D11SetDebugObjectName(m_pVertexShader_Plane.Get(), "VS_Plane_Plane");
-    D3D11SetDebugObjectName(m_pPixelShader_Plane.Get(), "PS_Plane_Plane");
+    D3D11SetDebugObjectName(m_pVertexShader_Plane.Get(), "VS_Plane");
+    D3D11SetDebugObjectName(m_pPixelShader_Plane.Get(), "PS_Plane");
 
 
     //更新常量缓冲区
     m_VSConstantBuffer.world = XMMatrixTranspose(
-        XMMatrixScalingFromVector(XMVectorSet(1.f,2.f,2.f,0.f)));
+        XMMatrixScalingFromVector(XMVectorSet(1.f,3.f,3.f,0.f)) *
+        XMMatrixTranslation(0.f , 1.f , 0.f));
 
     UpdateConstantBuffer();
     // 绘制顶点
     m_pd3dImmediateContext->DrawIndexed(m_IndexCount_Plane, 0, 0);
 }
 
-//设置汉字
-void GameApp::SetHanzi(float scale, float theta, float phi, float rotateAngle)
+//绘制汉字
+void GameApp::DrawHanzi(float scale, float theta, float phi, float rotateAngle)
 {
     // ******************
     // 设置顶点缓冲区和索引缓冲区
@@ -537,7 +850,7 @@ void GameApp::SetHanzi(float scale, float theta, float phi, float rotateAngle)
 
     m_pd3dImmediateContext->IASetVertexBuffers(0, 1, m_pVertexBuffer.GetAddressOf(), &stride, &offset);
 
-    // 创建Plane索引
+    // 创建Hanzi索引
     DWORD* indices = nullptr;
     Hanzi::CreateIndices(&indices, m_IndexCount_Hanzi);
 
@@ -572,16 +885,10 @@ void GameApp::SetHanzi(float scale, float theta, float phi, float rotateAngle)
 
     // 绑定VS
     m_pd3dImmediateContext->VSSetShader(m_pVertexShader_Hanzi.Get(), nullptr, 0);
-    // VS常量缓冲区对应HLSL寄存于b0的常量缓冲区
-    m_pd3dImmediateContext->VSSetConstantBuffers(0, 1, m_pConstantBuffers[0].GetAddressOf());
     // 绑定GS
     m_pd3dImmediateContext->GSSetShader(m_pGeometryShader_Hanzi.Get(), nullptr, 0);
-    // GS常量缓冲区对应HLSL寄存于b0的常量缓冲区
-    m_pd3dImmediateContext->GSSetConstantBuffers(0, 1, m_pConstantBuffers[0].GetAddressOf());
     // 绑定PS
     m_pd3dImmediateContext->PSSetShader(m_pPixelShader_Hanzi.Get(), nullptr, 0);
-    // PS常量缓冲区对应HLSL寄存于b1的常量缓冲区
-    m_pd3dImmediateContext->PSSetConstantBuffers(1, 1, m_pConstantBuffers[1].GetAddressOf());
 
     // ******************
     // 设置调试对象名
@@ -591,42 +898,43 @@ void GameApp::SetHanzi(float scale, float theta, float phi, float rotateAngle)
     D3D11SetDebugObjectName(m_pGeometryShader_Hanzi.Get(), "GS_Hanzi");
     D3D11SetDebugObjectName(m_pPixelShader_Hanzi.Get(), "PS_Hanzi");
 
-    //一次画50*50*3=7500个楠字，每个楠字有两个楠字围绕其旋转
-    //帧率60左右
+
     //绘制汉字
-    for (int i = 0; i < 50; ++i)
+    for (int i = 0; i < 20; ++i)
     {
-        for (int j = 0; j < 50; ++j)
+        for (int j = 0; j < 20; ++j)
         {
             //根据 i j 设置每个楠字的矩阵
             m_VSConstantBuffer.world = XMMatrixTranspose(
-                XMMatrixScalingFromVector(XMVectorReplicate(scale * 0.06f * (1 - 0.018f * i) * (1 - 0.018f * j))) *
+                XMMatrixScalingFromVector(XMVectorReplicate(scale * 0.15f * (1 - 0.018f * i) * (1 - 0.018f * j))) *
                 XMMatrixRotationX(theta) *
                 XMMatrixRotationY(phi) *
-                XMMatrixTranslation(-8.f + 0.18f * i, -4.5f + 0.18f * j, 0.f));
+                XMMatrixTranslation(-7.f + 0.4f * i, -2.f + 0.4f * j, 0.f));
             UpdateConstantBuffer();
             m_pd3dImmediateContext->DrawIndexed(m_IndexCount_Hanzi, 0, 0);
 
             //绕每个楠字X轴旋转一个
             m_VSConstantBuffer.world = XMMatrixTranspose(
-                XMMatrixScalingFromVector(XMVectorReplicate(scale * 0.06f * (1 - 0.018f * i) * (1 - 0.018f * j))) * //缩放
+                XMMatrixScalingFromVector(XMVectorReplicate(scale * 0.15f * (1 - 0.018f * i) * (1 - 0.018f * j))) * //缩放
                 XMMatrixTranslation(0.f, 0.06f, 0.06f) * //离旋转轴的距离
                 XMMatrixRotationAxis({ 1,0,0 }, rotateAngle) * //绕旋转轴旋转
-                XMMatrixTranslation(-8.f + 0.18f * i, -4.5f + 0.18f * j, 0.f)); //随旋转轴楠字的位置移动
+                XMMatrixTranslation(-7.f + 0.4f * i, -2.f + 0.4f * j, 0.f)); //随旋转轴楠字的位置移动
             UpdateConstantBuffer();
             m_pd3dImmediateContext->DrawIndexed(m_IndexCount_Hanzi, 0, 0);
 
             //绕每个楠字Y轴旋转一个
             m_VSConstantBuffer.world = XMMatrixTranspose(
-                XMMatrixScalingFromVector(XMVectorReplicate(scale * 0.06f * (1 - 0.018f * i) * (1 - 0.018f * j))) *
+                XMMatrixScalingFromVector(XMVectorReplicate(scale * 0.15f * (1 - 0.018f * i) * (1 - 0.018f * j))) *
                 XMMatrixTranslation(0.06f, 0.f, 0.06f) *
                 XMMatrixRotationAxis({ 0,1,0 }, rotateAngle) *
-                XMMatrixTranslation(-8.f + 0.18f * i, -4.5f + 0.18f * j, 0.f));
+                XMMatrixTranslation(-7.f + 0.4f * i, -2.f + 0.4f * j, 0.f));
             UpdateConstantBuffer();
             m_pd3dImmediateContext->DrawIndexed(m_IndexCount_Hanzi, 0, 0);
         }
     }
     
 }
+
+
 
 
