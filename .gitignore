@@ -1,8 +1,9 @@
 .vs/
 
 **/x64/
-**/*.exe
-**/*.exp
-**/*.lib
-**/*.pdb
-**/*.cso
+*.exe
+*.exp
+*.lib
+*.pdb
+*.cso
+*.ini
